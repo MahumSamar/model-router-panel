@@ -1,0 +1,967 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Model router</title>
+<meta name="description" content="Live model routing policy: blended cost, traffic split and fallback rules.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  .mr-section {
+    --bg: #f3f2f7;
+    --shell: #f6f5fa;
+    --panel: #ffffff;
+    --ink: #16161b;
+    --muted: #8a8a95;
+    --faint: #a4a4ae;
+    --line: #e5e4ec;
+    --accent: #e8582a;
+    --up: #d9532b;
+    --down: #1f9e7d;
+
+    --font-sans: "Inter Tight", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --font-mono: "Geist Mono", ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+
+    /* One design pixel. The panel is drawn on a 412 x 486 grid and every
+       dimension is a multiple of --u, so it scales as a single piece. */
+    --u: min((100vw - 20px) / 412, max(0.82px, min(1.3px, 100svh / 686)));
+    --mono: 8;
+    --mono-sm: 7.3;
+
+    position: relative;
+    height: 100vh;
+    height: 100svh;
+    min-height: calc(var(--u) * 486 + 32px);
+    overflow: hidden;
+    display: grid;
+    place-items: center;
+    background-color: var(--bg);
+    background-image: repeating-linear-gradient(30deg, transparent 0 calc(var(--u) * 13), rgba(30, 30, 80, 0.028) calc(var(--u) * 13) calc(var(--u) * 14));
+    color: var(--ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    isolation: isolate;
+  }
+
+  .mr-section *, .mr-section *::before, .mr-section *::after { box-sizing: border-box; }
+
+  .mr-section button {
+    font: inherit;
+    color: inherit;
+    background: none;
+    border: 0;
+    padding: 0;
+    margin: 0;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .mr-section button:focus-visible {
+    outline: calc(var(--u) * 1.5) solid rgba(67, 83, 214, 0.55);
+    outline-offset: calc(var(--u) * 1.5);
+  }
+
+  /* Page guides: solid container edges, dashed column around the panel */
+  .mr-guides {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 50%;
+    width: calc(var(--u) * 895);
+    transform: translateX(-50%);
+    border-left: 1px solid rgba(30, 30, 70, 0.09);
+    border-right: 1px solid rgba(30, 30, 70, 0.09);
+    pointer-events: none;
+    z-index: -1;
+  }
+
+  .mr-guides::before,
+  .mr-guides::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: repeating-linear-gradient(180deg, rgba(30, 30, 70, 0.16) 0 5px, transparent 5px 10px);
+  }
+
+  .mr-guides::before { left: calc(50% - var(--u) * 209); }
+  .mr-guides::after { left: calc(50% + var(--u) * 208); }
+
+  /* ---------- Shell ---------- */
+
+  .mr {
+    position: relative;
+    width: calc(var(--u) * 412);
+    padding: 0 calc(var(--u) * 3);
+    background: var(--shell);
+    border: 1px solid rgba(30, 30, 70, 0.07);
+    border-radius: calc(var(--u) * 18);
+    box-shadow:
+      0 calc(var(--u) * 1) calc(var(--u) * 2) rgba(30, 30, 70, 0.05),
+      0 calc(var(--u) * 28) calc(var(--u) * 48) calc(var(--u) * -18) rgba(30, 30, 70, 0.22),
+      0 calc(var(--u) * 50) calc(var(--u) * 70) calc(var(--u) * -30) rgba(30, 30, 70, 0.12);
+    font-size: calc(var(--u) * 10.2);
+    line-height: 1;
+  }
+
+  .mr-section .mr-mono {
+    font-family: var(--font-mono);
+    font-size: calc(var(--u) * var(--mono));
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+
+  .mr-dot {
+    flex: none;
+    width: calc(var(--u) * 5.5);
+    height: calc(var(--u) * 5.5);
+    border-radius: 50%;
+    background: var(--c);
+  }
+
+  .mr svg { display: block; }
+
+  /* ---------- Header ---------- */
+
+  .mr-head {
+    height: calc(var(--u) * 49);
+    display: flex;
+    align-items: center;
+    padding: 0 calc(var(--u) * 11) 0 calc(var(--u) * 10);
+  }
+
+  .mr-title {
+    margin: 0;
+    font-size: calc(var(--u) * 12.8);
+    font-weight: 500;
+    letter-spacing: -0.005em;
+  }
+
+  .mr-info {
+    margin-left: calc(var(--u) * 8);
+    width: calc(var(--u) * 11);
+    height: calc(var(--u) * 11);
+    color: var(--faint);
+  }
+
+  .mr-info svg, .mr-icon svg { width: 100%; height: 100%; }
+
+  .mr-section .mr-env {
+    margin-left: auto;
+    height: calc(var(--u) * 26);
+    display: inline-flex;
+    align-items: center;
+    gap: calc(var(--u) * 6);
+    padding: 0 calc(var(--u) * 8) 0 calc(var(--u) * 9);
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: calc(var(--u) * 9);
+    box-shadow: 0 calc(var(--u) * 1) calc(var(--u) * 1.5) rgba(30, 30, 70, 0.05);
+    font-size: calc(var(--u) * 10.1);
+    font-weight: 500;
+  }
+
+  .mr-env svg:first-child { width: calc(var(--u) * 12); height: calc(var(--u) * 12); color: #6f6f7a; }
+  .mr-env svg:last-child { width: calc(var(--u) * 9); height: calc(var(--u) * 9); margin-left: calc(var(--u) * 2); color: #3a3a44; }
+
+  .mr-icon {
+    width: calc(var(--u) * 24);
+    height: calc(var(--u) * 24);
+    display: grid;
+    place-items: center;
+    border-radius: calc(var(--u) * 7);
+    color: #4a4a55;
+    transition: background-color 0.15s, color 0.15s;
+  }
+
+  .mr-icon:hover { background: rgba(30, 30, 70, 0.06); color: var(--ink); }
+  .mr-icon svg { width: calc(var(--u) * 13); height: calc(var(--u) * 13); }
+  .mr-head .mr-icon:first-of-type { margin-left: calc(var(--u) * 4); }
+
+  /* ---------- Panels ---------- */
+
+  .mr-panel {
+    position: relative;
+    background: var(--panel);
+    border-radius: calc(var(--u) * 15);
+    box-shadow: 0 0 0 1px rgba(30, 30, 70, 0.045), 0 calc(var(--u) * 1) calc(var(--u) * 2) rgba(30, 30, 70, 0.05);
+    padding: 0 calc(var(--u) * 14);
+  }
+
+  .mr-panel + .mr-panel { margin-top: calc(var(--u) * 5); }
+
+  /* ---------- Summary ---------- */
+
+  .mr-summary { height: calc(var(--u) * 192); padding-top: calc(var(--u) * 13); }
+
+  .mr-kicker {
+    display: flex;
+    align-items: center;
+    height: calc(var(--u) * 11);
+    color: var(--faint);
+  }
+
+  .mr-delta { display: inline-block; margin-left: 0.7em; }
+  .mr-delta[data-dir="down"] { color: var(--down); }
+  .mr-delta[data-dir="up"] { color: var(--up); }
+
+  .mr-price {
+    display: flex;
+    align-items: baseline;
+    height: calc(var(--u) * 30);
+    margin-top: calc(var(--u) * 5);
+  }
+
+  .mr-price strong {
+    font-size: calc(var(--u) * 28);
+    font-weight: 500;
+    letter-spacing: -0.03em;
+    line-height: calc(var(--u) * 30);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .mr-price span {
+    margin-left: calc(var(--u) * 5);
+    font-size: calc(var(--u) * 11.2);
+    color: var(--faint);
+  }
+
+  .mr-stats {
+    margin-top: calc(var(--u) * 5);
+    height: calc(var(--u) * 11);
+    display: flex;
+    align-items: center;
+    color: #7d7d89;
+  }
+
+  .mr-stats i { font-style: normal; color: #c3c3cc; margin: 0 0.6em; }
+
+  .mr-seg {
+    position: absolute;
+    top: calc(var(--u) * 14);
+    right: calc(var(--u) * 14);
+    display: flex;
+    padding: calc(var(--u) * 3);
+    height: calc(var(--u) * 26);
+    border: 1px solid var(--line);
+    border-radius: calc(var(--u) * 13);
+    background: var(--panel);
+  }
+
+  .mr-seg__thumb {
+    position: absolute;
+    top: calc(var(--u) * 3 - 1px);
+    left: 0;
+    height: calc(var(--u) * 20);
+    border-radius: calc(var(--u) * 10);
+    background: var(--panel);
+    box-shadow:
+      0 0 0 1px rgba(30, 30, 70, 0.04),
+      0 calc(var(--u) * 1) calc(var(--u) * 2) rgba(30, 30, 70, 0.1),
+      0 calc(var(--u) * 10) calc(var(--u) * 18) calc(var(--u) * -4) rgba(30, 30, 70, 0.16);
+    transition: transform 0.24s cubic-bezier(0.3, 1.35, 0.5, 1), width 0.24s cubic-bezier(0.3, 1.35, 0.5, 1);
+  }
+
+  .mr-section .mr-seg button {
+    position: relative;
+    height: 100%;
+    padding: 0 calc(var(--u) * 9);
+    display: flex;
+    align-items: center;
+    color: var(--faint);
+    border-radius: calc(var(--u) * 10);
+    transition: color 0.1s 0.08s;
+  }
+
+  .mr-section .mr-seg button:hover { color: #6c6c78; }
+  .mr-section .mr-seg button[aria-pressed="true"] { color: var(--ink); font-weight: 500; }
+
+  .mr-graph {
+    width: 100%;
+    height: auto;
+    aspect-ratio: 376 / 96;
+    margin-top: calc(var(--u) * 11.5);
+    overflow: visible;
+  }
+
+  .mr-graph text { font-family: var(--font-sans); }
+  .mr-graph .mr-gmono { font-family: var(--font-mono); letter-spacing: 0.5px; fill: var(--faint); }
+  .mr-branch { cursor: default; transition: opacity 0.25s; }
+  .mr-branch path { fill: none; stroke: var(--c); stroke-linecap: round; }
+  .mr-branch .mr-halo { opacity: 0.18; }
+  .mr-branch .mr-core { opacity: 0.34; stroke-width: 1.2; }
+  .mr-branch .mr-hit { stroke: transparent; stroke-width: 14; pointer-events: stroke; }
+  .mr-branch rect { fill: transparent; }
+  .mr-branch .mr-end { fill: var(--c); }
+  .mr-branch .mr-name { font-size: 9.2px; font-weight: 500; fill: var(--ink); }
+  .mr-parts { transition: opacity 0.25s; pointer-events: none; }
+  .mr-parts circle { fill: var(--c); }
+  .mr-parts .mr-trail { opacity: 0.5; }
+
+  .is-dim { opacity: 0.36; }
+
+  /* ---------- Routes ---------- */
+
+  .mr-routes { padding-bottom: calc(var(--u) * 10); }
+
+  .mr-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) calc(var(--u) * 24) calc(var(--u) * 29) calc(var(--u) * 68) calc(var(--u) * 53) calc(var(--u) * 50);
+    align-items: center;
+    height: calc(var(--u) * 29.5);
+    border-bottom: 1px dashed #e9e8ef;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    transition: opacity 0.25s;
+    white-space: nowrap;
+  }
+
+  .mr-row--head { height: calc(var(--u) * 30.5); padding-top: calc(var(--u) * 5); color: var(--faint); }
+  .mr-section .mr-row--head .mr-mono { font-size: calc(var(--u) * var(--mono-sm)); }
+
+  .mr-row h3 {
+    margin: 0;
+    grid-column: span 2;
+    text-align: left;
+    font-size: calc(var(--u) * 10.8);
+    font-weight: 500;
+    color: var(--ink);
+  }
+
+  .mr-row__name {
+    display: flex;
+    align-items: center;
+    gap: calc(var(--u) * 6.5);
+    min-width: 0;
+    font-weight: 500;
+    text-align: left;
+  }
+
+  .mr-row__name .mr-mono { color: var(--faint); margin-left: calc(var(--u) * -0.5); font-weight: 400; }
+
+  .mr-bar {
+    height: calc(var(--u) * 3);
+    border-radius: calc(var(--u) * 2);
+    background: #e7e6ee;
+    overflow: hidden;
+  }
+
+  .mr-bar i {
+    display: block;
+    height: 100%;
+    min-width: calc(var(--u) * 2);
+    border-radius: inherit;
+    background: var(--c);
+  }
+
+  .mr-row__share, .mr-row__cost { font-weight: 500; }
+  .mr-row__lat { color: var(--muted); }
+  .mr-row__lat i { font-style: normal; color: #b9b9c2; margin: 0 0.18em; }
+  .mr-row__err { color: #74747f; }
+
+  /* ---------- Fallback ---------- */
+
+  .mr-fb {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    row-gap: calc(var(--u) * 6);
+    min-height: calc(var(--u) * 20);
+    margin-top: calc(var(--u) * 8.5);
+  }
+
+  .mr-section .mr-toggle {
+    position: relative;
+    flex: none;
+    width: calc(var(--u) * 24);
+    height: calc(var(--u) * 14);
+    margin-left: calc(var(--u) * -1);
+    border-radius: calc(var(--u) * 7);
+    background: var(--accent);
+    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.04);
+    transition: background-color 0.2s, box-shadow 0.2s;
+  }
+
+  .mr-toggle::after {
+    content: "";
+    position: absolute;
+    top: calc(var(--u) * 1.5);
+    left: calc(var(--u) * 1.5);
+    width: calc(var(--u) * 11);
+    height: calc(var(--u) * 11);
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 calc(var(--u) * 0.5) calc(var(--u) * 1.5) rgba(0, 0, 0, 0.22);
+    transform: translateX(calc(var(--u) * 10));
+    transition: transform 0.14s cubic-bezier(0.3, 0.7, 0.2, 1);
+  }
+
+  .mr-section .mr-toggle[aria-checked="false"] { background: #f4f3f8; box-shadow: inset 0 0 0 1px #d9d8e2; }
+  .mr-toggle[aria-checked="false"]::after { transform: none; }
+
+  .mr-fb__label { margin-left: calc(var(--u) * 6); font-weight: 500; }
+
+  .mr-fb__rule {
+    display: flex;
+    align-items: center;
+    margin-left: calc(var(--u) * 9);
+    color: var(--muted);
+    transition: opacity 0.15s;
+  }
+
+  .mr-fb.is-off .mr-fb__rule { opacity: 0.4; pointer-events: none; }
+
+  .mr-pick { position: relative; margin: 0 calc(var(--u) * 6.5); }
+  .mr-pick:last-child { margin-right: 0; }
+
+  .mr-section .mr-pick__btn {
+    height: calc(var(--u) * 20);
+    display: flex;
+    align-items: center;
+    gap: calc(var(--u) * 5);
+    padding: 0 calc(var(--u) * 6) 0 calc(var(--u) * 7);
+    background: var(--panel);
+    border: 1px solid #e1e0e9;
+    border-radius: calc(var(--u) * 8);
+    color: var(--ink);
+    font-weight: 500;
+    white-space: nowrap;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+
+  .mr-section .mr-pick__btn:hover { border-color: #cfcedb; }
+  .mr-section .mr-pick__btn[aria-expanded="true"] { border-color: #b9bbdc; box-shadow: 0 0 0 calc(var(--u) * 2) rgba(67, 83, 214, 0.08); }
+
+  .mr-pick__name, .mr-foot__status span { display: inline-block; }
+
+  .mr-pick__btn svg {
+    width: calc(var(--u) * 8);
+    height: calc(var(--u) * 8);
+    margin-left: calc(var(--u) * 1.5);
+    color: #a9a9b4;
+    transition: transform 0.2s;
+  }
+
+  .mr-pick__btn[aria-expanded="true"] svg { transform: rotate(180deg); }
+
+  .mr-menu {
+    position: absolute;
+    left: calc(var(--u) * -2);
+    bottom: calc(100% + var(--u) * 6);
+    z-index: 5;
+    width: calc(var(--u) * 152);
+    padding: calc(var(--u) * 3);
+    background: var(--panel);
+    border-radius: calc(var(--u) * 10);
+    box-shadow:
+      0 0 0 1px rgba(30, 30, 70, 0.06),
+      0 calc(var(--u) * 2) calc(var(--u) * 4) rgba(30, 30, 70, 0.05),
+      0 calc(var(--u) * 14) calc(var(--u) * 28) calc(var(--u) * -6) rgba(30, 30, 70, 0.2);
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(calc(var(--u) * 4)) scale(0.98);
+    transform-origin: 20% 100%;
+    transition: opacity 0.1s, transform 0.1s, visibility 0s 0.1s;
+  }
+
+  .mr-menu.is-open {
+    opacity: 1;
+    visibility: visible;
+    transform: none;
+    transition: opacity 0.12s, transform 0.12s cubic-bezier(0.2, 0.7, 0.3, 1);
+  }
+
+  .mr-menu__title {
+    display: block;
+    padding: calc(var(--u) * 8) calc(var(--u) * 6) calc(var(--u) * 6);
+    color: var(--faint);
+  }
+
+  .mr-section .mr-menu button {
+    width: 100%;
+    height: calc(var(--u) * 23.5);
+    display: flex;
+    align-items: center;
+    gap: calc(var(--u) * 6.5);
+    padding: 0 calc(var(--u) * 7);
+    border-radius: calc(var(--u) * 7);
+    font-weight: 500;
+    color: var(--ink);
+    text-align: left;
+    white-space: nowrap;
+  }
+
+  .mr-section .mr-menu button:hover,
+  .mr-section .mr-menu button:focus-visible { background: #f3f2f7; }
+
+  .mr-menu button .mr-mono {
+    margin-left: auto;
+    width: calc(var(--u) * 38);
+    color: var(--faint);
+    font-weight: 400;
+  }
+
+  .mr-menu button svg {
+    width: calc(var(--u) * 9);
+    height: calc(var(--u) * 9);
+    margin-left: calc(var(--u) * 1);
+    color: var(--accent);
+    visibility: hidden;
+  }
+
+  .mr-menu button[aria-checked="true"] svg { visibility: visible; }
+
+  /* ---------- Footer ---------- */
+
+  .mr-foot {
+    height: calc(var(--u) * 50);
+    display: flex;
+    align-items: center;
+    padding: 0 calc(var(--u) * 10) calc(var(--u) * 1) calc(var(--u) * 6);
+  }
+
+  .mr-foot .mr-icon svg { width: calc(var(--u) * 12); height: calc(var(--u) * 12); }
+
+  .mr-foot__status {
+    margin-left: calc(var(--u) * 4);
+    padding-left: calc(var(--u) * 10);
+    height: calc(var(--u) * 16);
+    display: flex;
+    align-items: center;
+    border-left: 1px solid var(--line);
+    color: #9a9aa5;
+  }
+
+  .mr-section .mr-deploy {
+    margin-left: auto;
+    height: calc(var(--u) * 24);
+    padding: 0 calc(var(--u) * 15.5);
+    border-radius: calc(var(--u) * 12);
+    background: var(--accent);
+    color: #fff;
+    font-size: calc(var(--u) * 9.6);
+    font-weight: 500;
+    white-space: nowrap;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.22),
+      0 calc(var(--u) * 1) calc(var(--u) * 2) rgba(190, 60, 20, 0.3),
+      0 calc(var(--u) * 5) calc(var(--u) * 10) calc(var(--u) * -3) rgba(232, 88, 42, 0.45);
+    transition: opacity 0.1s, transform 0.12s, filter 0.15s;
+  }
+
+  .mr-section .mr-deploy:hover { filter: brightness(1.06); }
+  .mr-section .mr-deploy:active { transform: scale(0.97); }
+  .mr-section .mr-deploy:disabled { opacity: 0.5; cursor: default; filter: none; transform: none; }
+
+  /* ---------- Small screens ---------- */
+
+  @media (max-width: 480px) {
+    .mr-section { --mono: 8.6; --mono-sm: 8; }
+    .mr-section .mr-mono { letter-spacing: 0.03em; }
+    .mr-row { grid-template-columns: minmax(0, 1fr) calc(var(--u) * 24) calc(var(--u) * 34) calc(var(--u) * 58) calc(var(--u) * 54); }
+    .mr-row:not(.mr-row--head) > :nth-child(4), .mr-row--head > :nth-child(3) { display: none; }
+    .mr-section .mr-seg button { padding: 0 calc(var(--u) * 7); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .mr-section *, .mr-section *::before, .mr-section *::after { transition-duration: 0.01ms !important; }
+  }
+</style>
+</head>
+<body style="margin:0">
+
+<section class="mr-section" aria-label="Model router">
+  <div class="mr-guides" aria-hidden="true"></div>
+
+  <div class="mr" id="mr">
+    <header class="mr-head">
+      <h2 class="mr-title">Model router</h2>
+      <span class="mr-info" title="Routes each request to a model by the active policy">
+        <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round"><circle cx="6" cy="6" r="5"/><path d="M6 5.5v3"/><circle cx="6" cy="3.6" r=".35" fill="currentColor"/></svg>
+      </span>
+      <button class="mr-env" type="button" aria-label="Environment: chat-prod">
+        <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"><rect x="1" y="1.5" width="10" height="3.8" rx="1.6"/><rect x="1" y="6.7" width="10" height="3.8" rx="1.6"/><path d="M8.6 3.4h.4M8.6 8.6h.4"/></svg>
+        chat-prod
+        <svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3.5 5 6.5 8 3.5"/></svg>
+      </button>
+      <button class="mr-icon" type="button" aria-label="Router settings">
+        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"><path d="M1.5 4.2h6M11.2 4.2h1.3M1.5 9.8h1.3M6.5 9.8h6"/><circle cx="9.3" cy="4.2" r="1.7"/><circle cx="4.7" cy="9.8" r="1.7"/></svg>
+      </button>
+      <button class="mr-icon" type="button" aria-label="Close">
+        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"><path d="M3 3l8 8M11 3l-8 8"/></svg>
+      </button>
+    </header>
+
+    <div class="mr-panel mr-summary">
+      <div class="mr-kicker mr-mono">Blended cost <span class="mr-delta" id="mrDelta">· Live policy</span></div>
+      <div class="mr-price"><strong id="mrPrice">$0.0046</strong><span>/ 1K tokens</span></div>
+      <div class="mr-stats mr-mono"><span id="mrReq">334</span>&nbsp;req/s<i>·</i>P95&nbsp;<span id="mrP95">1.26</span>&nbsp;s<i>·</i><span id="mrErr">0.50</span>%&nbsp;errors</div>
+
+      <div class="mr-seg" id="mrSeg" role="group" aria-label="Routing policy">
+        <span class="mr-seg__thumb" aria-hidden="true"></span>
+        <button class="mr-mono" type="button" data-mode="cost" aria-pressed="false">Cost</button>
+        <button class="mr-mono" type="button" data-mode="balanced" aria-pressed="true">Balanced</button>
+        <button class="mr-mono" type="button" data-mode="quality" aria-pressed="false">Quality</button>
+      </div>
+
+      <svg class="mr-graph" id="mrGraph" viewBox="0 0 376 96" role="img" aria-label="Traffic flowing from the gateway to each model">
+        <text class="mr-gmono" x="0" y="37" font-size="8">GATEWAY</text>
+        <g id="mrBranches"></g>
+        <circle cx="4.5" cy="47" r="3" fill="#fff" stroke="#8d8d98" stroke-width="1.1"/>
+      </svg>
+    </div>
+
+    <div class="mr-panel mr-routes">
+      <div class="mr-row mr-row--head">
+        <h3>Routes</h3>
+        <span class="mr-mono">Share</span>
+        <span class="mr-mono">P50 / P95 s</span>
+        <span class="mr-mono">$ / 1K</span>
+        <span class="mr-mono">Errors</span>
+      </div>
+      <div id="mrRows"></div>
+
+      <div class="mr-fb" id="mrFb">
+        <button class="mr-toggle" id="mrToggle" type="button" role="switch" aria-checked="true" aria-label="Fallback"></button>
+        <span class="mr-fb__label">Fallback</span>
+        <div class="mr-fb__rule">
+          if
+          <div class="mr-pick" data-pick="from" data-title="If this model fails"></div>
+          fails, retry on
+          <div class="mr-pick" data-pick="to" data-title="Retry on"></div>
+        </div>
+      </div>
+    </div>
+
+    <footer class="mr-foot">
+      <button class="mr-icon" type="button" aria-label="More actions">
+        <svg viewBox="0 0 12 12" fill="currentColor"><circle cx="6" cy="2.4" r="1"/><circle cx="6" cy="6" r="1"/><circle cx="6" cy="9.6" r="1"/></svg>
+      </button>
+      <span class="mr-foot__status mr-mono"><span id="mrStatus">Policy v14 · Live on chat-prod</span></span>
+      <button class="mr-deploy" id="mrDeploy" type="button" disabled>Deploy policy</button>
+    </footer>
+  </div>
+</section>
+
+<script>
+(function () {
+  var ROUTES = [
+    { name: 'Opus 5.5',    provider: 'Anthropic',   color: '#4353d6', p50: 0.84, p95: 2.16, cost: 0.0126, err: 0.42 },
+    { name: 'GPT-6.1 Sol', provider: 'OpenAI',      color: '#1f9e7d', p50: 0.51, p95: 1.34, cost: 0.0048, err: 0.27 },
+    { name: 'Haiku 4.5',   provider: 'Anthropic',   color: '#8b40d1', p50: 0.23, p95: 0.64, cost: 0.0007, err: 0.61 },
+    { name: 'Qwen3.5 9B',  provider: 'Self-hosted', color: '#c2296c', p50: 0.38, p95: 1.09, cost: 0.0019, err: 1.08 }
+  ];
+  var MODES = {
+    cost:     [0.06, 0.21, 0.49, 0.24],
+    balanced: [0.17, 0.42, 0.27, 0.14],
+    quality:  [0.58, 0.30, 0.08, 0.04]
+  };
+  var BRANCH_Y = [12, 36, 59, 83];
+  var SVG_NS = 'http://www.w3.org/2000/svg';
+  var CHEVRON = '<svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3.5 5 6.5 8 3.5"/></svg>';
+  var CHECK = '<svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 5.5 4 8l4.5-6"/></svg>';
+
+  var root = document.getElementById('mr');
+  var $ = function (id) { return document.getElementById(id); };
+  var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var live = { mode: 'balanced', fbOn: true, from: 0, to: 1 };
+  var state = { mode: 'balanced', fbOn: true, from: 0, to: 1 };
+  var version = 14;
+  var shares = MODES.balanced.slice();
+  var tween = null;
+  var reqTotal = 334;
+  var focused = -1;
+
+  function blend(key, s) {
+    return ROUTES.reduce(function (sum, r, i) { return sum + r[key] * s[i]; }, 0);
+  }
+  var liveCost = function () { return blend('cost', MODES[live.mode]); };
+
+  // Swap a label the way the panel does everywhere: old text lifts out, new text rises in
+  function roll(el, text, onSwap) {
+    if (el._next === text) return;
+    var first = el._next === undefined;
+    el._next = text;
+    if (first || reduceMotion || !el.animate) { el.textContent = text; if (onSwap) onSwap(); return; }
+    if (el._anim) el._anim.cancel();
+    var out = el._anim = el.animate(
+      [{ opacity: 1, transform: 'translateY(0)' }, { opacity: 0, transform: 'translateY(-40%)' }],
+      { duration: 60, easing: 'ease-in', fill: 'forwards' });
+    out.onfinish = function () {
+      el.textContent = el._next;
+      if (onSwap) onSwap();
+      out.cancel();
+      el._anim = el.animate(
+        [{ opacity: 0, transform: 'translateY(45%)' }, { opacity: 1, transform: 'translateY(0)' }],
+        { duration: 130, easing: 'cubic-bezier(0.2, 0.7, 0.3, 1)' });
+    };
+  }
+
+  /* ----- Build graph branches and table rows ----- */
+
+  var branches = [], rows = [], luts = [];
+  ROUTES.forEach(function (r, i) {
+    var y = BRANCH_Y[i];
+    var d = 'M7.5 47H56C88 47 80 ' + y + ' 114 ' + y + 'H279';
+    var g = document.createElementNS(SVG_NS, 'g');
+    g.setAttribute('class', 'mr-branch');
+    g.style.setProperty('--c', r.color);
+    g.innerHTML =
+      '<path class="mr-halo" d="' + d + '"/><path class="mr-core" d="' + d + '"/>' +
+      '<g class="mr-parts"></g>' +
+      '<path class="mr-hit" d="M114 ' + y + 'H279"/><rect x="272" y="' + (y - 11.5) + '" width="104" height="23"/>' +
+      '<circle class="mr-end" cx="279" cy="' + y + '" r="3.2"/>' +
+      '<text class="mr-name" x="288" y="' + (y + 3.7) + '">' + r.name + '</text>' +
+      '<text class="mr-gmono mr-rate" x="376" y="' + (y + 3) + '" font-size="8" text-anchor="end"></text>';
+    $('mrBranches').appendChild(g);
+
+    var path = g.querySelector('.mr-core'), len = path.getTotalLength(), lut = [];
+    for (var k = 0; k <= 160; k++) lut.push(path.getPointAtLength(len * k / 160));
+    luts.push(lut);
+
+    var row = document.createElement('div');
+    row.className = 'mr-row';
+    row.style.setProperty('--c', r.color);
+    row.innerHTML =
+      '<span class="mr-row__name"><span class="mr-dot"></span>' + r.name + '<span class="mr-mono">' + r.provider + '</span></span>' +
+      '<span class="mr-bar"><i></i></span>' +
+      '<span class="mr-row__share"></span>' +
+      '<span class="mr-row__lat">' + r.p50.toFixed(2) + '<i>/</i>' + r.p95.toFixed(2) + '</span>' +
+      '<span class="mr-row__cost">$' + r.cost.toFixed(4) + '</span>' +
+      '<span class="mr-row__err">' + r.err.toFixed(2) + '%</span>';
+    $('mrRows').appendChild(row);
+
+    branches.push({ g: g, halo: g.querySelector('.mr-halo'), rate: g.querySelector('.mr-rate'), parts: g.querySelector('.mr-parts') });
+    rows.push({ el: row, bar: row.querySelector('.mr-bar i'), share: row.querySelector('.mr-row__share') });
+
+    [g, row].forEach(function (el) {
+      el.addEventListener('mouseenter', function () { setFocus(i); });
+      el.addEventListener('mouseleave', function () { setFocus(-1); });
+    });
+  });
+
+  function setFocus(i) {
+    focused = i;
+    ROUTES.forEach(function (_, k) {
+      var dim = i !== -1 && k !== i;
+      branches[k].g.classList.toggle('is-dim', dim);
+      rows[k].el.classList.toggle('is-dim', dim);
+    });
+  }
+
+  /* ----- Fallback pickers ----- */
+
+  var picks = {};
+  Array.prototype.forEach.call(root.querySelectorAll('.mr-pick'), function (el) {
+    var key = el.dataset.pick;
+    el.innerHTML =
+      '<button class="mr-pick__btn" type="button" aria-haspopup="menu" aria-expanded="false"><span class="mr-dot"></span><span class="mr-pick__name"></span>' + CHEVRON + '</button>' +
+      '<div class="mr-menu" role="menu"><span class="mr-menu__title mr-mono">' + el.dataset.title + '</span>' +
+      ROUTES.map(function (r, i) {
+        return '<button type="button" role="menuitemradio" data-i="' + i + '" style="--c:' + r.color + '"><span class="mr-dot"></span>' + r.name +
+          '<span class="mr-mono">$' + r.cost.toFixed(4) + '</span>' + CHECK + '</button>';
+      }).join('') + '</div>';
+    var p = picks[key] = { el: el, btn: el.querySelector('.mr-pick__btn'), menu: el.querySelector('.mr-menu') };
+
+    p.btn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var open = !p.menu.classList.contains('is-open');
+      closeMenus();
+      if (open) { p.menu.classList.add('is-open'); p.btn.setAttribute('aria-expanded', 'true'); }
+    });
+    p.menu.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var item = e.target.closest('button');
+      if (!item) return;
+      var i = +item.dataset.i, other = key === 'from' ? 'to' : 'from';
+      // A model can't fall back to itself: picking the other side's model swaps them
+      if (state[other] === i) state[other] = state[key];
+      state[key] = i;
+      renderPolicy();
+    });
+  });
+
+  function closeMenus() {
+    Object.keys(picks).forEach(function (k) {
+      picks[k].menu.classList.remove('is-open');
+      picks[k].btn.setAttribute('aria-expanded', 'false');
+    });
+  }
+  document.addEventListener('click', closeMenus);
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeMenus(); });
+
+  /* ----- Policy controls ----- */
+
+  var seg = $('mrSeg'), thumb = seg.querySelector('.mr-seg__thumb');
+  function placeThumb() {
+    var btn = seg.querySelector('[aria-pressed="true"]');
+    thumb.style.width = btn.offsetWidth + 'px';
+    thumb.style.transform = 'translateX(' + btn.offsetLeft + 'px)';
+  }
+  seg.addEventListener('click', function (e) {
+    var btn = e.target.closest('button');
+    if (!btn || btn.dataset.mode === state.mode) return;
+    state.mode = btn.dataset.mode;
+    tween = { from: shares.slice(), to: MODES[state.mode], start: performance.now() };
+    renderPolicy();
+  });
+  // Button widths change when the web font lands or the panel rescales
+  if (window.ResizeObserver) new ResizeObserver(placeThumb).observe(seg);
+  else window.addEventListener('resize', placeThumb);
+
+  $('mrToggle').addEventListener('click', function () {
+    state.fbOn = !state.fbOn;
+    closeMenus();
+    renderPolicy();
+  });
+
+  $('mrDeploy').addEventListener('click', function () {
+    var btn = this;
+    btn.disabled = true;
+    btn.textContent = 'Deploying…';
+    setTimeout(function () {
+      live = { mode: state.mode, fbOn: state.fbOn, from: state.from, to: state.to };
+      version++;
+      btn.textContent = 'Deploy policy';
+      renderPolicy();
+      renderNumbers();
+    }, 900);
+  });
+
+  function isDirty() {
+    return state.mode !== live.mode || state.fbOn !== live.fbOn || state.from !== live.from || state.to !== live.to;
+  }
+
+  function renderPolicy() {
+    Array.prototype.forEach.call(seg.querySelectorAll('button'), function (b) {
+      b.setAttribute('aria-pressed', String(b.dataset.mode === state.mode));
+    });
+    placeThumb();
+
+    $('mrToggle').setAttribute('aria-checked', String(state.fbOn));
+    $('mrFb').classList.toggle('is-off', !state.fbOn);
+    Object.keys(picks).forEach(function (k) {
+      var p = picks[k], r = ROUTES[state[k]];
+      roll(p.btn.querySelector('.mr-pick__name'), r.name, function () { p.btn.style.setProperty('--c', r.color); });
+      Array.prototype.forEach.call(p.menu.querySelectorAll('button'), function (b) {
+        b.setAttribute('aria-checked', String(+b.dataset.i === state[k]));
+      });
+    });
+
+    var dirty = isDirty();
+    roll($('mrStatus'), 'Policy v' + version + ' · ' + (dirty ? 'Unsaved changes' : 'Live on chat-prod'));
+    $('mrDeploy').disabled = !dirty;
+    renderDelta();
+  }
+
+  function renderDelta() {
+    var el = $('mrDelta'), dir = '', text;
+    if (state.mode !== live.mode) {
+      // The badge states where the policy lands, so it doesn't count along with the price
+      var pct = Math.round((blend('cost', MODES[state.mode]) / liveCost() - 1) * 100);
+      dir = pct < 0 ? 'down' : 'up';
+      text = (pct < 0 ? '▼ ' : '▲ ') + Math.abs(pct) + '% vs live';
+    } else {
+      text = isDirty() ? '· Same as live' : '· Live policy';
+    }
+    roll(el, text, function () { el.dataset.dir = dir; });
+  }
+
+  function renderNumbers() {
+    $('mrPrice').textContent = '$' + blend('cost', shares).toFixed(4);
+    $('mrP95').textContent = blend('p95', shares).toFixed(2);
+    $('mrErr').textContent = blend('err', shares).toFixed(2);
+    $('mrReq').textContent = reqTotal;
+    ROUTES.forEach(function (_, i) {
+      var s = shares[i];
+      branches[i].halo.setAttribute('stroke-width', (1.3 + s * 5.5).toFixed(2));
+      branches[i].rate.textContent = Math.round(MODES[state.mode][i] * reqTotal) + '/S';
+      rows[i].share.textContent = Math.round(s * 100) + '%';
+      rows[i].bar.style.width = (s * 100).toFixed(1) + '%';
+    });
+    renderDelta();
+  }
+
+  /* ----- Live traffic ----- */
+
+  var particles = [], carry = 0, last = performance.now();
+  var SPAWN_PER_SEC = 19, TRAVEL_MS = 2300, TRAIL = 3, TRAIL_GAP = 0.0105;
+
+  // A request is a dot with a short dotted wake behind it
+  function spawn(i, progress) {
+    var g = document.createElementNS(SVG_NS, 'g'), els = [];
+    for (var j = 0; j <= TRAIL; j++) {
+      var c = document.createElementNS(SVG_NS, 'circle');
+      c.setAttribute('r', j ? '0.65' : '1.85');
+      if (j) c.setAttribute('class', 'mr-trail');
+      g.appendChild(c);
+      els.push(c);
+    }
+    branches[i].parts.appendChild(g);
+    particles.push({ g: g, els: els, route: i, p: progress || 0, speed: 0.85 + Math.random() * 0.3 });
+  }
+
+  function pickRoute() {
+    var w = MODES[state.mode], r = Math.random(), i = 0;
+    while (i < w.length - 1 && (r -= w[i]) > 0) i++;
+    return i;
+  }
+
+  function place(pt) {
+    var lut = luts[pt.route];
+    for (var j = 0; j < pt.els.length; j++) {
+      var f = Math.max(0, pt.p - j * TRAIL_GAP) * 160, k = Math.min(159, f | 0), t = f - k;
+      pt.els[j].setAttribute('cx', (lut[k].x + (lut[k + 1].x - lut[k].x) * t).toFixed(2));
+      pt.els[j].setAttribute('cy', (lut[k].y + (lut[k + 1].y - lut[k].y) * t).toFixed(2));
+    }
+  }
+
+  function frame(now) {
+    var dt = Math.min(64, now - last);
+    last = now;
+
+    if (tween) {
+      var t = Math.min(1, (now - tween.start) / 550);
+      var e = 1 - Math.pow(1 - t, 3);
+      shares = tween.from.map(function (a, i) { return a + (tween.to[i] - a) * e; });
+      if (t === 1) tween = null;
+      renderNumbers();
+    }
+
+    if (!reduceMotion) {
+      carry += dt / 1000 * SPAWN_PER_SEC * (0.4 + Math.random() * 1.2);
+      while (carry >= 1) { carry--; spawn(pickRoute()); }
+      for (var i = particles.length - 1; i >= 0; i--) {
+        var pt = particles[i];
+        pt.p += dt / TRAVEL_MS * pt.speed;
+        if (pt.p >= 1) { pt.g.remove(); particles.splice(i, 1); }
+        else place(pt);
+      }
+    }
+    requestAnimationFrame(frame);
+  }
+
+  // Pre-fill the lines so the graph isn't empty on first paint
+  for (var n = 0; n < 44; n++) spawn(pickRoute(), Math.random());
+  particles.forEach(place);
+
+  setInterval(function () {
+    if (document.hidden) return;
+    reqTotal = Math.max(318, Math.min(338, reqTotal + Math.round(Math.random() * 3.4 - 2)));
+    if (reqTotal === 318) reqTotal = 334;
+    if (!tween) renderNumbers();
+  }, 1100);
+
+  renderNumbers();
+  renderPolicy();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
